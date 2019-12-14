@@ -3,494 +3,713 @@
 # Licensed under the MIT License. See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-
-import pytest
 import logging
-from azure.iot.device.common.models import X509
-from azure.iot.device.common.pipeline import pipeline_stages_base
+import pytest
+import functools
+import sys
+from azure.iot.device.common.models.x509 import X509
 from azure.iot.device.provisioning.security.sk_security_client import SymmetricKeySecurityClient
 from azure.iot.device.provisioning.security.x509_security_client import X509SecurityClient
-from azure.iot.device.provisioning.pipeline.provisioning_pipeline import ProvisioningPipeline
-from azure.iot.device.provisioning.pipeline import pipeline_ops_provisioning
-from tests.common.pipeline import helpers
+from azure.iot.device.provisioning.pipeline import (
+    pipeline_stages_provisioning,
+    pipeline_ops_provisioning,
+)
+from azure.iot.device.common.pipeline import pipeline_ops_base
+
+from tests.common.pipeline.helpers import (
+    assert_callback_succeeded,
+    assert_callback_failed,
+    all_common_ops,
+    all_common_events,
+    all_except,
+    StageTestBase,
+)
+from azure.iot.device.common.pipeline import pipeline_events_base
+from tests.provisioning.pipeline.helpers import all_provisioning_ops
+from tests.common.pipeline import pipeline_stage_test
+from azure.iot.device.exceptions import ServiceError
 import json
+import datetime
+from azure.iot.device.provisioning.models.registration_result import (
+    RegistrationResult,
+    RegistrationState,
+)
+from tests.common.pipeline.helpers import StageRunOpTestBase
+from azure.iot.device import exceptions
+
 
 logging.basicConfig(level=logging.DEBUG)
 
-send_msg_qos = 1
+this_module = sys.modules[__name__]
 
-fake_symmetric_key = "Zm9vYmFy"
-fake_registration_id = "MyPensieve"
-fake_id_scope = "Enchanted0000Ceiling7898"
-fake_provisioning_host = "beauxbatons.academy-net"
+
+# Make it look like we're always running inside pipeline threads
+@pytest.fixture(autouse=True)
+def apply_fake_pipeline_thread(fake_pipeline_thread):
+    pass
+
+
 fake_device_id = "elder_wand"
 fake_registration_id = "registered_remembrall"
 fake_provisioning_host = "hogwarts.com"
 fake_id_scope = "weasley_wizard_wheezes"
-fake_ca_cert = "fake_certificate"
+fake_ca_cert = "fake_ca_cert"
 fake_sas_token = "horcrux_token"
-fake_security_client = "secure_via_muffliato"
-fake_request_id = "fake_request_1234"
-fake_mqtt_payload = "hello hogwarts"
-fake_register_publish_payload = '{{"payload": {json_payload}, "registrationId": "{reg_id}"}}'.format(
-    reg_id=fake_registration_id, json_payload=json.dumps(fake_mqtt_payload)
-)
-fake_operation_id = "fake_operation_9876"
-fake_sub_unsub_topic = "$dps/registrations/res/#"
+fake_request_id = "Request1234"
+fake_operation_id = "Operation4567"
+fake_status = "Flying"
+fake_assigned_hub = "Dumbledore'sArmy"
+fake_sub_status = "FlyingOnHippogriff"
+fake_created_dttm = datetime.datetime(2020, 5, 17)
+fake_last_update_dttm = datetime.datetime(2020, 10, 17)
+fake_etag = "HighQualityFlyingBroom"
+fake_payload = "petrificus totalus"
+fake_symmetric_key = "Zm9vYmFy"
 fake_x509_cert_file = "fantastic_beasts"
 fake_x509_cert_key_file = "where_to_find_them"
 fake_pass_phrase = "alohomora"
 
 
-def mock_x509():
-    return X509(fake_x509_cert_file, fake_x509_cert_key_file, fake_pass_phrase)
+pipeline_stage_test.add_base_pipeline_stage_tests_old(
+    cls=pipeline_stages_provisioning.UseSecurityClientStage,
+    module=this_module,
+    all_ops=all_common_ops + all_provisioning_ops,
+    handled_ops=[
+        pipeline_ops_provisioning.SetSymmetricKeySecurityClientOperation,
+        pipeline_ops_provisioning.SetX509SecurityClientOperation,
+    ],
+    all_events=all_common_events,
+    handled_events=[],
+)
 
 
-different_security_clients = [
-    pytest.param(
-        {
-            "client_class": SymmetricKeySecurityClient,
-            "init_kwargs": {
-                "provisioning_host": fake_provisioning_host,
-                "registration_id": fake_registration_id,
-                "id_scope": fake_id_scope,
-                "symmetric_key": fake_symmetric_key,
-            },
-            "set_args_op_class": pipeline_ops_provisioning.SetSymmetricKeySecurityClientOperation,
-        },
-        id="Symmetric",
-    ),
-    pytest.param(
-        {
-            "client_class": X509SecurityClient,
-            "init_kwargs": {
-                "provisioning_host": fake_provisioning_host,
-                "registration_id": fake_registration_id,
-                "id_scope": fake_id_scope,
-                "x509": mock_x509(),
-            },
-            "set_args_op_class": pipeline_ops_provisioning.SetX509SecurityClientOperation,
-        },
-        id="X509",
-    ),
-]
+pipeline_stage_test.add_base_pipeline_stage_tests_old(
+    cls=pipeline_stages_provisioning.RegistrationStage,
+    module=this_module,
+    all_ops=all_common_ops + all_provisioning_ops,
+    handled_ops=[pipeline_ops_provisioning.SendRegistrationRequestOperation],
+    all_events=all_common_events,
+    handled_events=[],
+)
 
 
-def assert_for_symmetric_key(password):
-    assert password is not None
-    assert "SharedAccessSignature" in password
-    assert "skn=registration" in password
-    assert fake_id_scope in password
-    assert fake_registration_id in password
+pipeline_stage_test.add_base_pipeline_stage_tests_old(
+    cls=pipeline_stages_provisioning.PollingStatusStage,
+    module=this_module,
+    all_ops=all_common_ops + all_provisioning_ops,
+    handled_ops=[pipeline_ops_provisioning.SendQueryRequestOperation],
+    all_events=all_common_events,
+    handled_events=[],
+)
 
 
-def assert_for_client_x509(x509):
-    assert x509 is not None
-    assert x509.certificate_file == fake_x509_cert_file
-    assert x509.key_file == fake_x509_cert_key_file
-    assert x509.pass_phrase == fake_pass_phrase
+def make_mock_x509_security_client():
+    mock_x509 = X509(fake_x509_cert_file, fake_x509_cert_key_file, fake_pass_phrase)
+    return X509SecurityClient(
+        provisioning_host=fake_provisioning_host,
+        registration_id=fake_registration_id,
+        id_scope=fake_id_scope,
+        x509=mock_x509,
+    )
 
 
-@pytest.fixture(scope="function")
-def input_security_client(params_security_clients):
-    return params_security_clients["client_class"](**params_security_clients["init_kwargs"])
+def make_mock_symmetric_security_client():
+    return SymmetricKeySecurityClient(
+        provisioning_host=fake_provisioning_host,
+        registration_id=fake_registration_id,
+        id_scope=fake_id_scope,
+        symmetric_key=fake_symmetric_key,
+    )
 
 
-@pytest.fixture
-def pipeline_configuration(mocker):
-    return mocker.MagicMock()
+class FakeRegistrationResult(object):
+    def __init__(self, operation_id, status, state):
+        self.operationId = operation_id
+        self.status = status
+        self.registrationState = state
+
+    def __str__(self):
+        return "\n".join([str(self.registrationState), self.status])
 
 
-# automatically mock the transport for all tests in this file.
-@pytest.fixture(autouse=True)
-def mock_mqtt_transport(mocker):
-    return mocker.patch(
-        "azure.iot.device.provisioning.pipeline.provisioning_pipeline.pipeline_stages_mqtt.MQTTTransport"
-    ).return_value
+class FakeRegistrationState(object):
+    def __init__(self, payload):
+        self.deviceId = fake_device_id
+        self.assignedHub = fake_assigned_hub
+        self.payload = payload
+        self.substatus = fake_sub_status
+
+    def __str__(self):
+        return "\n".join(
+            [self.deviceId, self.assignedHub, self.substatus, self.get_payload_string()]
+        )
+
+    def get_payload_string(self):
+        return json.dumps(self.payload, default=lambda o: o.__dict__, sort_keys=True)
 
 
-@pytest.fixture(scope="function")
-def mock_provisioning_pipeline(
-    mocker, input_security_client, mock_mqtt_transport, pipeline_configuration
+def create_registration_result(fake_payload, status):
+    state = FakeRegistrationState(payload=fake_payload)
+    return FakeRegistrationResult(fake_operation_id, status, state)
+
+
+def get_registration_result_as_bytes(registration_result):
+    return json.dumps(registration_result, default=lambda o: o.__dict__).encode("utf-8")
+
+
+###################
+# COMMON FIXTURES #
+###################
+
+
+@pytest.fixture(params=[True, False], ids=["With error", "No error"])
+def op_error(request, arbitrary_exception):
+    if request.param:
+        return arbitrary_exception
+    else:
+        return None
+
+
+#############################
+# USE SECURITY CLIENT STAGE #
+#############################
+
+
+class UseSecurityClientStageTestConfig(object):
+    @pytest.fixture
+    def cls_type(self):
+        return pipeline_stages_provisioning.UseSecurityClientStage
+
+    @pytest.fixture
+    def init_kwargs(self):
+        return {}
+
+    @pytest.fixture
+    def stage(self, mocker, cls_type, init_kwargs):
+        stage = cls_type(**init_kwargs)
+        stage.send_op_down = mocker.MagicMock()
+        stage.send_event_up = mocker.MagicMock()
+        return stage
+
+
+pipeline_stage_test.add_base_pipeline_stage_tests(
+    test_module=this_module,
+    stage_class_under_test=pipeline_stages_provisioning.UseSecurityClientStage,
+    stage_test_config_class=UseSecurityClientStageTestConfig,
+)
+
+
+@pytest.mark.describe(
+    "UseSecurityClientStage - .run_op() -- Called with SetSymmetricKeySecurityClientOperation"
+)
+class TestUseSecurityClientStageRunOpWithSetSymmetricKeySecurityClientOperation(
+    StageRunOpTestBase, UseSecurityClientStageTestConfig
 ):
-    provisioning_pipeline = ProvisioningPipeline(input_security_client, pipeline_configuration)
-    provisioning_pipeline.on_connected = mocker.MagicMock()
-    provisioning_pipeline.on_disconnected = mocker.MagicMock()
-    provisioning_pipeline.on_message_received = mocker.MagicMock()
-    helpers.add_mock_method_waiter(provisioning_pipeline, "on_connected")
-    helpers.add_mock_method_waiter(provisioning_pipeline, "on_disconnected")
-    helpers.add_mock_method_waiter(mock_mqtt_transport, "publish")
-
-    yield provisioning_pipeline
-    provisioning_pipeline.disconnect()
-
-
-@pytest.mark.parametrize("params_security_clients", different_security_clients)
-@pytest.mark.describe("Provisioning pipeline - Initializer")
-class TestInit(object):
-    @pytest.mark.it("Happens correctly with the specific security client")
-    def test_instantiates_correctly(
-        self, params_security_clients, input_security_client, pipeline_configuration
-    ):
-        provisioning_pipeline = ProvisioningPipeline(input_security_client, pipeline_configuration)
-        assert provisioning_pipeline._pipeline is not None
-
-    @pytest.mark.it("Calls the correct op to pass the security client args into the pipeline")
-    def test_passes_security_client_args(
-        self, mocker, params_security_clients, input_security_client, pipeline_configuration
-    ):
-        mocker.spy(pipeline_stages_base.PipelineRootStage, "run_op")
-        provisioning_pipeline = ProvisioningPipeline(input_security_client, pipeline_configuration)
-
-        op = provisioning_pipeline._pipeline.run_op.call_args[0][1]
-        assert provisioning_pipeline._pipeline.run_op.call_count == 1
-        assert isinstance(op, params_security_clients["set_args_op_class"])
-        assert op.security_client is input_security_client
-
-    @pytest.mark.it("Raises an exception if the pipeline op to set security client args fails")
-    def test_passes_security_client_args_failure(
-        self,
-        mocker,
-        params_security_clients,
-        input_security_client,
-        arbitrary_exception,
-        pipeline_configuration,
-    ):
-        old_execute_op = pipeline_stages_base.PipelineRootStage._execute_op
-
-        def fail_set_auth_provider(self, op):
-            if isinstance(op, params_security_clients["set_args_op_class"]):
-                op.complete(error=arbitrary_exception)
-            else:
-                old_execute_op(self, op)
-
-        mocker.patch.object(
-            pipeline_stages_base.PipelineRootStage,
-            "_execute_op",
-            side_effect=fail_set_auth_provider,
-            autospec=True,
+    @pytest.fixture
+    def op(self, mocker):
+        security_client = SymmetricKeySecurityClient(
+            provisioning_host="hogwarts.com",
+            registration_id="registered_remembrall",
+            id_scope="weasley_wizard_wheezes",
+            symmetric_key="Zm9vYmFy",
+        )
+        security_client.get_current_sas_token = mocker.MagicMock()
+        return pipeline_ops_provisioning.SetSymmetricKeySecurityClientOperation(
+            security_client=security_client, callback=mocker.MagicMock()
         )
 
-        with pytest.raises(arbitrary_exception.__class__) as e_info:
-            ProvisioningPipeline(input_security_client, pipeline_configuration)
-        assert e_info.value is arbitrary_exception
+    @pytest.mark.it(
+        "Sends a new SetProvisioningClientConnectionArgsOperation op down the pipeline, containing connection info from the op's security client"
+    )
+    def test_send_new_op_down(self, mocker, op, stage):
+        stage.run_op(op)
 
-
-@pytest.mark.parametrize("params_security_clients", different_security_clients)
-@pytest.mark.describe("Provisioning pipeline - Connect")
-class TestConnect(object):
-    @pytest.mark.it("Calls connect on transport")
-    def test_connect_calls_connect_on_provider(
-        self, params_security_clients, mock_provisioning_pipeline, mock_mqtt_transport
-    ):
-        mock_provisioning_pipeline.connect()
-
-        assert mock_mqtt_transport.connect.call_count == 1
-
-        if params_security_clients["client_class"].__name__ == "SymmetricKeySecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is not None
-            assert_for_symmetric_key(mock_mqtt_transport.connect.call_args[1]["password"])
-        elif params_security_clients["client_class"].__name__ == "X509SecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is None
-
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-    @pytest.mark.it("After complete calls handler with new state")
-    def test_connected_state_handler_called_wth_new_state_once_provider_gets_connected(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
-    ):
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        mock_provisioning_pipeline.on_connected.assert_called_once_with("connected")
-
-    @pytest.mark.it("Is ignored if waiting for completion of previous one")
-    def test_connect_ignored_if_waiting_for_connect_complete(
-        self, mock_provisioning_pipeline, params_security_clients, mock_mqtt_transport
-    ):
-        mock_provisioning_pipeline.connect()
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        assert mock_mqtt_transport.connect.call_count == 1
-
-        if params_security_clients["client_class"].__name__ == "SymmetricKeySecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is not None
-            assert_for_symmetric_key(mock_mqtt_transport.connect.call_args[1]["password"])
-        elif params_security_clients["client_class"].__name__ == "X509SecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is None
-
-        mock_provisioning_pipeline.on_connected.assert_called_once_with("connected")
-
-    @pytest.mark.it("Is ignored if waiting for completion of send")
-    def test_connect_ignored_if_waiting_for_send_complete(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
-    ):
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        mock_mqtt_transport.reset_mock()
-        mock_provisioning_pipeline.on_connected.reset_mock()
-
-        mock_provisioning_pipeline.register(payload=fake_mqtt_payload)
-        mock_provisioning_pipeline.connect()
-
-        mock_mqtt_transport.connect.assert_not_called()
-        mock_provisioning_pipeline.wait_for_on_connected_to_not_be_called()
-        mock_provisioning_pipeline.on_connected.assert_not_called()
-
-        mock_mqtt_transport.on_mqtt_published(0)
-
-        mock_mqtt_transport.connect.assert_not_called()
-        mock_provisioning_pipeline.wait_for_on_connected_to_not_be_called()
-        mock_provisioning_pipeline.on_connected.assert_not_called()
-
-
-@pytest.mark.parametrize("params_security_clients", different_security_clients)
-@pytest.mark.describe("Provisioning pipeline - Send Register")
-class TestSendRegister(object):
-    @pytest.mark.it("Request calls publish on provider")
-    def test_send_register_request_calls_publish_on_provider(
-        self, mocker, mock_provisioning_pipeline, params_security_clients, mock_mqtt_transport
-    ):
-        mock_init_uuid = mocker.patch(
-            "azure.iot.device.common.pipeline.pipeline_stages_base.uuid.uuid4"
-        )
-        mock_init_uuid.return_value = fake_request_id
-
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-        mock_provisioning_pipeline.register(payload=fake_mqtt_payload)
-
-        assert mock_mqtt_transport.connect.call_count == 1
-
-        if params_security_clients["client_class"].__name__ == "SymmetricKeySecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is not None
-            assert_for_symmetric_key(mock_mqtt_transport.connect.call_args[1]["password"])
-        elif params_security_clients["client_class"].__name__ == "X509SecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is None
-
-        fake_publish_topic = "$dps/registrations/PUT/iotdps-register/?$rid={}".format(
-            fake_request_id
+        # A SetProvisioningClientConnectionArgsOperation has been sent down the pipeline
+        stage.send_op_down.call_count == 1
+        new_op = stage.send_op_down.call_args[0][0]
+        assert isinstance(
+            new_op, pipeline_ops_provisioning.SetProvisioningClientConnectionArgsOperation
         )
 
-        mock_mqtt_transport.wait_for_publish_to_be_called()
-        assert mock_mqtt_transport.publish.call_count == 1
-        assert mock_mqtt_transport.publish.call_args[1]["topic"] == fake_publish_topic
-        assert mock_mqtt_transport.publish.call_args[1]["payload"] == fake_register_publish_payload
+        # The SetProvisioningClientConnectionArgsOperation has details from the security client
+        assert new_op.provisioning_host == op.security_client.provisioning_host
+        assert new_op.registration_id == op.security_client.registration_id
+        assert new_op.id_scope == op.security_client.id_scope
+        assert new_op.sas_token == op.security_client.get_current_sas_token.return_value
+        assert new_op.client_cert is None
 
-    @pytest.mark.it("Request queues and connects before calling publish on provider")
-    def test_send_request_queues_and_connects_before_sending(
-        self, mocker, mock_provisioning_pipeline, params_security_clients, mock_mqtt_transport
-    ):
-
-        mock_init_uuid = mocker.patch(
-            "azure.iot.device.common.pipeline.pipeline_stages_base.uuid.uuid4"
-        )
-        mock_init_uuid.return_value = fake_request_id
-        # send an event
-        mock_provisioning_pipeline.register(payload=fake_mqtt_payload)
-
-        # verify that we called connect
-        assert mock_mqtt_transport.connect.call_count == 1
-
-        if params_security_clients["client_class"].__name__ == "SymmetricKeySecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is not None
-            assert_for_symmetric_key(mock_mqtt_transport.connect.call_args[1]["password"])
-        elif params_security_clients["client_class"].__name__ == "X509SecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is None
-
-        # verify that we're not connected yet and verify that we havent't published yet
-        mock_provisioning_pipeline.wait_for_on_connected_to_not_be_called()
-        mock_provisioning_pipeline.on_connected.assert_not_called()
-        mock_mqtt_transport.wait_for_publish_to_not_be_called()
-        mock_mqtt_transport.publish.assert_not_called()
-
-        # finish the connection
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        # verify that our connected callback was called and verify that we published the event
-        mock_provisioning_pipeline.on_connected.assert_called_once_with("connected")
-
-        fake_publish_topic = "$dps/registrations/PUT/iotdps-register/?$rid={}".format(
-            fake_request_id
+    @pytest.mark.it(
+        "Completes the original SetSymmetricKeySecurityClientOperation with the same status as the new SetProvisioningClientConnectionArgsOperation, if the new  SetProvisioningClientConnectionArgsOperation is completed"
+    )
+    def test_new_op_completes_success(self, mocker, op, stage, op_error):
+        stage.run_op(op)
+        stage.send_op_down.call_count == 1
+        new_op = stage.send_op_down.call_args[0][0]
+        assert isinstance(
+            new_op, pipeline_ops_provisioning.SetProvisioningClientConnectionArgsOperation
         )
 
-        mock_mqtt_transport.wait_for_publish_to_be_called()
-        assert mock_mqtt_transport.publish.call_count == 1
-        assert mock_mqtt_transport.publish.call_args[1]["topic"] == fake_publish_topic
-        assert mock_mqtt_transport.publish.call_args[1]["payload"] == fake_register_publish_payload
+        assert not op.completed
+        assert not new_op.completed
 
-    @pytest.mark.it("Request queues and waits for connect to be completed")
-    def test_send_request_queues_if_waiting_for_connect_complete(
-        self, mocker, mock_provisioning_pipeline, params_security_clients, mock_mqtt_transport
-    ):
-        mock_init_uuid = mocker.patch(
-            "azure.iot.device.common.pipeline.pipeline_stages_base.uuid.uuid4"
+        new_op.complete(error=op_error)
+
+        assert new_op.completed
+        assert new_op.error is op_error
+        assert op.completed
+        assert op.error is op_error
+
+
+@pytest.mark.describe(
+    "UseSecurityClientStage - .run_op() -- Called with SetX509SecurityClientOperation"
+)
+class TestUseSecurityClientStageRunOpWithSetX509SecurityClientOperation(
+    StageRunOpTestBase, UseSecurityClientStageTestConfig
+):
+    @pytest.fixture
+    def op(self, mocker):
+        x509 = X509(cert_file="fake_cert.txt", key_file="fake_key.txt", pass_phrase="alohomora")
+        security_client = X509SecurityClient(
+            provisioning_host="hogwarts.com",
+            registration_id="registered_remembrall",
+            id_scope="weasley_wizard_wheezes",
+            x509=x509,
         )
-        mock_init_uuid.return_value = fake_request_id
-
-        # start connecting and verify that we've called into the transport
-        mock_provisioning_pipeline.connect()
-        assert mock_mqtt_transport.connect.call_count == 1
-
-        if params_security_clients["client_class"].__name__ == "SymmetricKeySecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is not None
-            assert_for_symmetric_key(mock_mqtt_transport.connect.call_args[1]["password"])
-        elif params_security_clients["client_class"].__name__ == "X509SecurityClient":
-            assert mock_mqtt_transport.connect.call_args[1]["password"] is None
-
-        # send an event
-        mock_provisioning_pipeline.register(payload=fake_mqtt_payload)
-
-        # verify that we're not connected yet and verify that we havent't published yet
-        mock_provisioning_pipeline.wait_for_on_connected_to_not_be_called()
-        mock_provisioning_pipeline.on_connected.assert_not_called()
-        mock_mqtt_transport.wait_for_publish_to_not_be_called()
-        mock_mqtt_transport.publish.assert_not_called()
-
-        # finish the connection
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        # verify that our connected callback was called and verify that we published the event
-        mock_provisioning_pipeline.on_connected.assert_called_once_with("connected")
-        fake_publish_topic = "$dps/registrations/PUT/iotdps-register/?$rid={}".format(
-            fake_request_id
+        security_client.get_x509_certificate = mocker.MagicMock()
+        return pipeline_ops_provisioning.SetX509SecurityClientOperation(
+            security_client=security_client, callback=mocker.MagicMock()
         )
-        mock_mqtt_transport.wait_for_publish_to_be_called()
-        assert mock_mqtt_transport.publish.call_count == 1
-        assert mock_mqtt_transport.publish.call_args[1]["topic"] == fake_publish_topic
-        assert mock_mqtt_transport.publish.call_args[1]["payload"] == fake_register_publish_payload
 
-    @pytest.mark.it("Request can be sent multiple times overlapping each other")
-    def test_send_request_sends_overlapped_events(
-        self, mock_provisioning_pipeline, mock_mqtt_transport, mocker
-    ):
-        mock_init_uuid = mocker.patch(
-            "azure.iot.device.common.pipeline.pipeline_stages_base.uuid.uuid4"
+    @pytest.mark.it(
+        "Sends a new SetProvisioningClientConnectionArgsOperation op down the pipeline, containing connection info from the op's security client"
+    )
+    def test_send_new_op_down(self, mocker, op, stage):
+        stage.run_op(op)
+
+        # A SetProvisioningClientConnectionArgsOperation has been sent down the pipeline
+        stage.send_op_down.call_count == 1
+        new_op = stage.send_op_down.call_args[0][0]
+        assert isinstance(
+            new_op, pipeline_ops_provisioning.SetProvisioningClientConnectionArgsOperation
         )
-        mock_init_uuid.return_value = fake_request_id
 
-        fake_request_id_1 = fake_request_id
-        fake_msg_1 = fake_mqtt_payload
-        fake_msg_2 = "Petrificus Totalus"
+        # The SetProvisioningClientConnectionArgsOperation has details from the security client
+        assert new_op.provisioning_host == op.security_client.provisioning_host
+        assert new_op.registration_id == op.security_client.registration_id
+        assert new_op.id_scope == op.security_client.id_scope
+        assert new_op.client_cert == op.security_client.get_x509_certificate.return_value
+        assert new_op.sas_token is None
 
-        # connect
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        # send an event
-        callback_1 = mocker.MagicMock()
-        mock_provisioning_pipeline.register(payload=fake_msg_1, callback=callback_1)
-
-        fake_publish_topic = "$dps/registrations/PUT/iotdps-register/?$rid={}".format(
-            fake_request_id_1
+    @pytest.mark.it(
+        "Completes the original SetX509SecurityClientOperation with the same status as the new SetProvisioningClientConnectionArgsOperation, if the new  SetProvisioningClientConnectionArgsOperation is completed"
+    )
+    def test_new_op_completes_success(self, mocker, op, stage, op_error):
+        stage.run_op(op)
+        stage.send_op_down.call_count == 1
+        new_op = stage.send_op_down.call_args[0][0]
+        assert isinstance(
+            new_op, pipeline_ops_provisioning.SetProvisioningClientConnectionArgsOperation
         )
-        mock_mqtt_transport.wait_for_publish_to_be_called()
-        assert mock_mqtt_transport.publish.call_count == 1
-        assert mock_mqtt_transport.publish.call_args[1]["topic"] == fake_publish_topic
-        assert mock_mqtt_transport.publish.call_args[1]["payload"] == fake_register_publish_payload
 
-        # while we're waiting for that send to complete, send another event
-        callback_2 = mocker.MagicMock()
-        # provisioning_pipeline.send_message(fake_msg_2, callback_2)
-        mock_provisioning_pipeline.register(payload=fake_msg_2, callback=callback_2)
+        assert not op.completed
+        assert not new_op.completed
 
-        # verify that we've called publish twice and verify that neither send_message
-        # has completed (because we didn't do anything here to complete it).
-        mock_mqtt_transport.wait_for_publish_to_be_called()
-        assert mock_mqtt_transport.publish.call_count == 2
-        callback_1.assert_not_called()
-        callback_2.assert_not_called()
+        new_op.complete(error=op_error)
 
-    @pytest.mark.it("Connects , sends request queues and then disconnects")
-    def test_connect_send_disconnect(self, mock_provisioning_pipeline, mock_mqtt_transport):
-        # connect
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-
-        # send an event
-        mock_provisioning_pipeline.register(payload=fake_mqtt_payload)
-        mock_mqtt_transport.on_mqtt_published(0)
-
-        # disconnect
-        mock_provisioning_pipeline.disconnect()
-        mock_mqtt_transport.disconnect.assert_called_once_with()
+        assert new_op.completed
+        assert new_op.error is op_error
+        assert op.completed
+        assert op.error is op_error
 
 
-@pytest.mark.parametrize("params_security_clients", different_security_clients)
-@pytest.mark.describe("Provisioning pipeline - Disconnect")
-class TestDisconnect(object):
-    @pytest.mark.it("Calls disconnect on provider")
-    def test_disconnect_calls_disconnect_on_provider(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
+class ProvisioningStageConfig(object):
+    @pytest.fixture
+    def cls_type(self):
+        return pipeline_stages_provisioning.RegistrationStage
+
+    @pytest.fixture
+    def init_kwargs(self):
+        return {}
+
+    @pytest.fixture
+    def stage(self, mocker, cls_type, init_kwargs):
+        stage = cls_type(**init_kwargs)
+        stage.send_op_down = mocker.MagicMock()
+        stage.send_event_up = mocker.MagicMock()
+        return stage
+
+
+@pytest.mark.parametrize(
+    "request_payload",
+    [pytest.param(" ", id="empty payload"), pytest.param(fake_payload, id="some payload")],
+)
+@pytest.mark.describe(
+    "RegistrationStage - .run_op() -- called with SendRegistrationRequestOperation"
+)
+class TestRegistrationStageWithSendRegistrationRequestOperation(StageTestBase):
+    @pytest.fixture
+    def stage(self):
+        return pipeline_stages_provisioning.RegistrationStage()
+
+    @pytest.fixture
+    def op(self, stage, mocker, request_payload):
+        op = pipeline_ops_provisioning.SendRegistrationRequestOperation(
+            request_payload, fake_registration_id, callback=mocker.MagicMock()
+        )
+        mocker.spy(op, "complete")
+        mocker.spy(op, "spawn_worker_op")
+        return op
+
+    @pytest.fixture()
+    def request_body(self, request_payload):
+        return '{{"payload": {json_payload}, "registrationId": "{reg_id}"}}'.format(
+            reg_id=fake_registration_id, json_payload=json.dumps(request_payload)
+        )
+
+    @pytest.mark.it(
+        "Runs a RequestAndResponseOperation operation on the next stage with request_type='register', method='PUT', resource_location='/', and request_body as json of payload"
+    )
+    def test_sends_new_operation(self, stage, op, request_body):
+        stage.run_op(op)
+        assert stage.next.run_op.call_count == 1
+        new_op = stage.next.run_op.call_args[0][0]
+        assert isinstance(new_op, pipeline_ops_base.RequestAndResponseOperation)
+        assert new_op.request_type == "register"
+        assert new_op.method == "PUT"
+        assert new_op.resource_location == "/"
+        assert new_op.request_body == request_body
+
+    @pytest.mark.it(
+        "Completes the SendRegistrationRequestOperation with the failure from RequestAndResponseOperation, if the RequestAndResponseOperation completes with failure"
+    )
+    def test_next_stage_returns_error(self, mocker, stage, op, arbitrary_exception):
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.complete(error=arbitrary_exception)
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        assert op.complete.call_args == mocker.call(error=arbitrary_exception)
+
+    @pytest.mark.it(
+        "Completes the SendRegistrationRequestOperation with a ServiceError if the RequestAndResponseOperation returns a status code >= 300"
+    )
+    def test_next_stage_returns_status_over_300(self, mocker, stage, op):
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 400
+            # next_stage_op.response_body = json.dumps("").encode("utf-8")
+            next_stage_op.complete()
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        assert type(op.complete.call_args[1]["error"]) is ServiceError
+
+    @pytest.mark.it(
+        "Decodes, deserializes, and returns the response from RequestAndResponseOperation as the registration_result attribute on the op along with no error if the status code < 300 and if status is 'assigned'"
+    )
+    def test_stage_completes_with_result_when_next_stage_responds_with_status_assigned(
+        self, mocker, stage, op, request_payload
     ):
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-        mock_provisioning_pipeline.disconnect()
+        registration_result = create_registration_result(request_payload, "assigned")
 
-        mock_mqtt_transport.disconnect.assert_called_once_with()
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
 
-    @pytest.mark.it("Is ignored if already disconnected")
-    def test_disconnect_ignored_if_already_disconnected(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        assert op.complete.call_args == mocker.call(error=None)
+        # We need to assert string representations as these are inherently different objects
+        assert str(op.registration_result) == str(registration_result)
+
+    @pytest.mark.it(
+        "Decodes, deserializes, and returns the response from RequestAndResponseOperation as the registration_result attribute on the op along with an error if the status code < 300 and if status is 'failed'"
+    )
+    def test_stage_completes_with_error_if_next_stage_responds_with_failed_status_but_successful_status_code(
+        self, stage, op, request_payload
     ):
-        mock_provisioning_pipeline.disconnect(None)
+        registration_result = create_registration_result(request_payload, "failed")
 
-        mock_mqtt_transport.disconnect.assert_not_called()
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
 
-    @pytest.mark.it("After complete calls handler with `disconnected` state")
-    def test_disconnect_calls_client_disconnect_callback(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        # We need to assert string representations as these are different objects
+        assert str(op.registration_result) == str(registration_result)
+        # We can only assert instance other wise we need to assert the exact text
+        assert isinstance(op.complete.call_args[1]["error"], exceptions.ServiceError)
+        assert "failed registration status" in str(op.complete.call_args[1]["error"])
+
+    @pytest.mark.it(
+        "Decodes, deserializes the response from RequestAndResponseOperation and creates another op if the status code < 300 and if status is 'assigning'"
+    )
+    def test_stage_spawns_another_op_if_next_stage_responds_with_assigning_status_but_successful_status_code(
+        self, stage, op, request_payload
     ):
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
+        registration_result = create_registration_result(request_payload, "assigning")
 
-        mock_provisioning_pipeline.disconnect()
-        mock_mqtt_transport.on_mqtt_disconnected_handler(None)
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
 
-        mock_provisioning_pipeline.wait_for_on_disconnected_to_be_called()
-        mock_provisioning_pipeline.on_disconnected.assert_called_once_with("disconnected")
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.spawn_worker_op.call_count == 1
+        assert (
+            op.spawn_worker_op.call_args[1]["worker_op_type"]
+            == pipeline_ops_provisioning.SendQueryRequestOperation
+        )
+        assert op.spawn_worker_op.call_args[1]["request_payload"] == " "
+        assert op.spawn_worker_op.call_args[1]["operation_id"] == fake_operation_id
+        assert op.spawn_worker_op.call_args[1]["callback"] is not None
 
-
-@pytest.mark.parametrize("params_security_clients", different_security_clients)
-@pytest.mark.describe("Provisioning pipeline - Enable")
-class TestEnable(object):
-    @pytest.mark.it("Calls subscribe on provider")
-    def test_subscribe_calls_subscribe_on_provider(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
+    @pytest.mark.it(
+        "Decodes, deserializes the response from RequestAndResponseOperation and retries the op if the status code > 429"
+    )
+    def test_stage_retries_op_if_next_stage_responds_with_status_code_greater_than_429(
+        self, mocker, stage, op, request_body, request_payload
     ):
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-        mock_provisioning_pipeline.enable_responses()
+        mock_timer = mocker.patch(
+            "azure.iot.device.provisioning.pipeline.pipeline_stages_provisioning.Timer"
+        )
 
-        assert mock_mqtt_transport.subscribe.call_count == 1
-        assert mock_mqtt_transport.subscribe.call_args[1]["topic"] == fake_sub_unsub_topic
+        stage.run_op(op)
+        assert stage.next.run_op.call_count == 1
+        next_op = stage.next.run_op.call_args[0][0]
 
+        assert isinstance(next_op, pipeline_ops_base.RequestAndResponseOperation)
 
-@pytest.mark.parametrize("params_security_clients", different_security_clients)
-@pytest.mark.describe("Provisioning pipeline - Disable")
-class TestDisable(object):
-    @pytest.mark.it("Calls unsubscribe on provider")
-    def test_unsubscribe_calls_unsubscribe_on_provider(
-        self, mock_provisioning_pipeline, mock_mqtt_transport
+        next_op.status_code = 430
+        next_op.retry_after = "1"
+        registration_result = create_registration_result(request_payload, "assigning")
+        next_op.response_body = get_registration_result_as_bytes(registration_result)
+        next_op.complete()
+
+        stage.next.run_op.reset_mock()
+
+        timer_callback = mock_timer.call_args[0][1]
+        timer_callback()
+
+        assert stage.next.run_op.call_count == 1
+        next_op_2 = stage.next.run_op.call_args[0][0]
+        assert isinstance(next_op_2, pipeline_ops_base.RequestAndResponseOperation)
+        assert next_op_2.request_type == "register"
+        assert next_op_2.method == "PUT"
+        assert next_op_2.resource_location == "/"
+        assert next_op_2.request_body == request_body
+
+    @pytest.mark.it(
+        "Decodes, deserializes the response from RequestAndResponseOperation and completes the op with error if the status code < 300 and if status is unknown"
+    )
+    def test_stage_completes_with_error_if_next_stage_responds_with_some_unknown_status_but_successful_status_code(
+        self, stage, op, request_payload
     ):
-        mock_provisioning_pipeline.connect()
-        mock_mqtt_transport.on_mqtt_connected_handler()
-        mock_provisioning_pipeline.wait_for_on_connected_to_be_called()
-        mock_provisioning_pipeline.disable_responses(None)
+        registration_result = create_registration_result(request_payload, "quidditching")
 
-        assert mock_mqtt_transport.unsubscribe.call_count == 1
-        assert mock_mqtt_transport.unsubscribe.call_args[1]["topic"] == fake_sub_unsub_topic
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        # We can only assert instance other wise we need to assert the exact text
+        assert isinstance(op.complete.call_args[1]["error"], exceptions.ServiceError)
+        assert "invalid registration status" in str(op.complete.call_args[1]["error"])
+
+
+@pytest.mark.describe("PollingStatusStage - .run_op() -- called with SendQueryRequestOperation")
+class TestPollingStatusStageWithSendQueryRequestOperation(StageTestBase):
+    @pytest.fixture
+    def stage(self):
+        return pipeline_stages_provisioning.PollingStatusStage()
+
+    @pytest.fixture
+    def op(self, stage, mocker):
+        op = pipeline_ops_provisioning.SendQueryRequestOperation(
+            fake_operation_id, " ", callback=mocker.MagicMock()
+        )
+        mocker.spy(op, "complete")
+        return op
+
+    @pytest.mark.it(
+        "Runs a RequestAndResponseOperation operation on the next stage with request_type='query', method='GET', resource_location='/', and blank request_body"
+    )
+    def test_sends_new_operation(self, stage, op):
+        stage.run_op(op)
+        assert stage.next.run_op.call_count == 1
+        new_op = stage.next.run_op.call_args[0][0]
+        assert isinstance(new_op, pipeline_ops_base.RequestAndResponseOperation)
+        assert new_op.request_type == "query"
+        assert new_op.method == "GET"
+        assert new_op.resource_location == "/"
+        assert new_op.request_body == " "
+
+    @pytest.mark.it(
+        "Completes the SendQueryRequestOperation with the failure from RequestAndResponseOperation, if the RequestAndResponseOperation completes with failure"
+    )
+    def test_next_stage_returns_error(self, mocker, stage, op, arbitrary_exception):
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.complete(error=arbitrary_exception)
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        assert op.complete.call_args == mocker.call(error=arbitrary_exception)
+
+    @pytest.mark.it(
+        "Completes the SendQueryRequestOperation with a ServiceError if the RequestAndResponseOperation returns a status code >= 300"
+    )
+    def test_next_stage_returns_status_over_300(self, mocker, stage, op):
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 400
+            next_stage_op.complete()
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        assert type(op.complete.call_args[1]["error"]) is ServiceError
+
+    @pytest.mark.it(
+        "Decodes, deserializes, and returns the response from RequestAndResponseOperation as the registration_result attribute on the op with no error if the status code < 300 and if status is 'assigned'"
+    )
+    def test_stage_completes_with_result_when_next_stage_responds_with_status_assigned(
+        self, mocker, stage, op
+    ):
+        registration_result = create_registration_result(" ", "assigned")
+
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        assert op.complete.call_args == mocker.call(error=None)
+        # We need to assert string representations as these are inherently different objects
+        assert str(op.registration_result) == str(registration_result)
+
+    @pytest.mark.it(
+        "Decodes, deserializes, and returns the response from RequestAndResponseOperation as the registration_result attribute on the op along with an error if the status code < 300 and if status is 'failed'"
+    )
+    def test_stage_completes_with_error_if_next_stage_responds_with_status_failed(self, stage, op):
+        registration_result = create_registration_result(" ", "failed")
+
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        # We need to assert string representations as these are different objects
+        assert str(op.registration_result) == str(registration_result)
+        # We can only assert instance other wise we need to assert the exact text
+        assert isinstance(op.complete.call_args[1]["error"], exceptions.ServiceError)
+        assert "failed registration status" in str(op.complete.call_args[1]["error"])
+
+    @pytest.mark.it(
+        "Decodes, deserializes the response from RequestAndResponseOperation and retries the op if the status code > 429"
+    )
+    def test_stage_retries_op_if_next_stage_responds_with_status_code_greater_than_429(
+        self, mocker, stage, op
+    ):
+        mock_timer = mocker.patch(
+            "azure.iot.device.provisioning.pipeline.pipeline_stages_provisioning.Timer"
+        )
+
+        stage.run_op(op)
+        assert stage.next.run_op.call_count == 1
+        next_op = stage.next.run_op.call_args[0][0]
+
+        assert isinstance(next_op, pipeline_ops_base.RequestAndResponseOperation)
+
+        next_op.status_code = 430
+        next_op.retry_after = "1"
+        registration_result = create_registration_result(" ", "flying")
+        next_op.response_body = get_registration_result_as_bytes(registration_result)
+        next_op.complete()
+
+        stage.next.run_op.reset_mock()
+
+        timer_callback = mock_timer.call_args[0][1]
+        timer_callback()
+
+        assert stage.next.run_op.call_count == 1
+        next_op_2 = stage.next.run_op.call_args[0][0]
+        assert isinstance(next_op_2, pipeline_ops_base.RequestAndResponseOperation)
+        assert next_op_2.request_type == "query"
+        assert next_op_2.method == "GET"
+        assert next_op_2.resource_location == "/"
+        assert next_op_2.request_body == " "
+
+    @pytest.mark.it(
+        "Decodes, deserializes the response from RequestAndResponseOperation and retries the op if the status code < 300 and if status is 'assigning'"
+    )
+    def test_stage_retries_op_if_next_stage_responds_with_status_assigning(self, mocker, stage, op):
+        mock_timer = mocker.patch(
+            "azure.iot.device.provisioning.pipeline.pipeline_stages_provisioning.Timer"
+        )
+
+        stage.run_op(op)
+        assert stage.next.run_op.call_count == 1
+        next_op = stage.next.run_op.call_args[0][0]
+
+        assert isinstance(next_op, pipeline_ops_base.RequestAndResponseOperation)
+
+        next_op.status_code = 250
+        next_op.retry_after = "1"
+        registration_result = create_registration_result(" ", "assigning")
+        next_op.response_body = get_registration_result_as_bytes(registration_result)
+        next_op.complete()
+
+        stage.next.run_op.reset_mock()
+
+        timer_callback = mock_timer.call_args[0][1]
+        timer_callback()
+
+        assert stage.next.run_op.call_count == 1
+        next_op_2 = stage.next.run_op.call_args[0][0]
+        assert isinstance(next_op_2, pipeline_ops_base.RequestAndResponseOperation)
+        assert next_op_2.request_type == "query"
+        assert next_op_2.method == "GET"
+        assert next_op_2.resource_location == "/"
+        assert next_op_2.request_body == " "
+
+    @pytest.mark.it(
+        "Decodes, deserializes the response from RequestAndResponseOperation and completes the op with error if the status code < 300 and if status is unknown"
+    )
+    def test_stage_completes_with_error_if_next_stage_responds_with_some_unknown_status_but_successful_status_code(
+        self, stage, op
+    ):
+        registration_result = create_registration_result(" ", "quidditching")
+
+        def next_stage_run_op(self, next_stage_op):
+            next_stage_op.status_code = 200
+            next_stage_op.response_body = get_registration_result_as_bytes(registration_result)
+            next_stage_op.retry_after = None
+            next_stage_op.complete()
+
+        stage.next.run_op = functools.partial(next_stage_run_op, (stage.next,))
+        stage.run_op(op)
+        assert op.complete.call_count == 1
+        # We can only assert instance other wise we need to assert the exact text
+        assert isinstance(op.complete.call_args[1]["error"], exceptions.ServiceError)
+        assert "invalid registration status" in str(op.complete.call_args[1]["error"])
