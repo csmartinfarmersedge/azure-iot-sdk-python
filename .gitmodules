@@ -1,3 +1,0 @@
-[submodule "c"]
-	path = c
-	url = https://github.com/csmartinfarmersedge/azure-iot-sdk-c
