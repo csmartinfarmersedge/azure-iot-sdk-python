@@ -49,7 +49,7 @@ usage ()
     echo " --no-logging                  Disable logging"
     echo " --provisioning                Use Provisioning with Flow"
     echo " --use-tpm-simulator           Build TPM simulator"
-    echo " --use-edge-modules            Build Edge modules"    
+    echo " --use-edge-modules            Build Edge modules"
     exit 1
 }
 
@@ -59,7 +59,7 @@ process_args ()
     extracloptions=" "
 
     for arg in $*
-    do      
+    do
       if [ $save_next_arg == 1 ]
       then
         # save arg to pass to gcc
@@ -74,11 +74,11 @@ process_args ()
       then
         # save the arg to python version
         build_python="$arg"
-        if [ $build_python != "2.7" ] && [ $build_python != "3.4" ] && [ $build_python != "3.5" ] && [ $build_python != "3.6" ]
+        if [ $build_python != "2.7" ] && [ $build_python != "3.4" ] && [ $build_python != "3.5" ] && [ $build_python != "3.6" ] && [ $build_python != "3.7" ]
         then
-          echo "Supported python versions are 2.7, 3.4 or 3.5 or 3.6"
+          echo "Supported python versions are 2.7, 3.4 or 3.5 or 3.6 or 3.7"
           exit 1
-        fi 
+        fi
         save_next_arg=0
       elif [ $save_next_arg == 4 ]
       then
@@ -115,7 +115,7 @@ process_args ()
       toolchainfile=$(readlink -f $toolchainfile)
       toolchainfile="-DCMAKE_TOOLCHAIN_FILE=$toolchainfile"
     fi
-   
+
    if [ "$cmake_install_prefix" != " " ]
    then
      cmake_install_prefix="-DCMAKE_INSTALL_PREFIX=$cmake_install_prefix"
@@ -133,26 +133,26 @@ if [ "$make" = true ]
 then
   # Set the default cores
   MAKE_CORES=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || sysctl -n hw.ncpu)
-  
+
   echo "Initial MAKE_CORES=$MAKE_CORES"
-  
-  # Make sure there is enough virtual memory on the device to handle more than one job  
+
+  # Make sure there is enough virtual memory on the device to handle more than one job
   MINVSPACE="1500000"
-  
+
   # Acquire total memory and total swap space setting them to zero in the event the command fails
   MEMAR=( $(sed -n -e 's/^MemTotal:[^0-9]*\([0-9][0-9]*\).*/\1/p' -e 's/^SwapTotal:[^0-9]*\([0-9][0-9]*\).*/\1/p' /proc/meminfo) )
   [ -z "${MEMAR[0]##*[!0-9]*}" ] && MEMAR[0]=0
   [ -z "${MEMAR[1]##*[!0-9]*}" ] && MEMAR[1]=0
-  
+
   let VSPACE=${MEMAR[0]}+${MEMAR[1]}
-  
+
   echo "VSPACE=$VSPACE"
 
   if [ "$VSPACE" -lt "$MINVSPACE" ] ; then
     echo "WARNING: Not enough space.  Setting MAKE_CORES=1"
     MAKE_CORES=1
   fi
-  
+
   echo "MAKE_CORES=$MAKE_CORES"
   echo "Starting run..."
   date
@@ -160,7 +160,7 @@ then
   echo "completed run..."
   date
 
-  # Only for testing E2E behaviour !!! 
+  # Only for testing E2E behaviour !!!
   TEST_CORES=16
 
   if [[ $run_valgrind == 1 ]] ;
